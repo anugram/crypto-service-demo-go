@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 )
@@ -26,6 +27,15 @@ type EncryptionResponse struct {
 
 type DecryptionResponse struct {
 	DecryptedText string `json:"decryptedText"`
+}
+
+type ProtectRevealRequest struct {
+	Data     string `json:"data"`
+	Username string `json:"username"`
+}
+
+type ProtectRevealResponse struct {
+	Result string `json:"result"`
 }
 
 // Global variables for the AES key and IV
@@ -48,6 +58,9 @@ func main() {
 
 	http.HandleFunc("/encrypt", encryptHandler)
 	http.HandleFunc("/decrypt", decryptHandler)
+	http.HandleFunc("/protect", protectHandler)
+	http.HandleFunc("/reveal", revealHandler)
+
 	fmt.Println("Starting server on port 8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
@@ -89,7 +102,6 @@ func decryptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decode the Base64 encrypted data
 	encryptedData, err := base64.StdEncoding.DecodeString(req.EncryptedData)
 	if err != nil {
 		http.Error(w, "Invalid encrypted data format", http.StatusBadRequest)
@@ -105,6 +117,50 @@ func decryptHandler(w http.ResponseWriter, r *http.Request) {
 	resp := DecryptionResponse{DecryptedText: string(decryptedData)}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func protectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ProtectRevealRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := forwardRequest("http://crdp-service:8090/v1/protect", req)
+	if err != nil {
+		http.Error(w, "Failed to call protect service: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(resp)
+}
+
+func revealHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ProtectRevealRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := forwardRequest("http://crdp-service:8090/v1/reveal", req)
+	if err != nil {
+		http.Error(w, "Failed to call reveal service: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(resp)
 }
 
 func encryptAES(plaintext, key, iv []byte) ([]byte, error) {
@@ -161,4 +217,24 @@ func generateRandomBytes(size int) ([]byte, error) {
 		return nil, err
 	}
 	return bytes, nil
+}
+
+func forwardRequest(url string, req ProtectRevealRequest) ([]byte, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	httpResp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
+	if err != nil {
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return respBody, nil
 }
