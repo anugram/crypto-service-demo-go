@@ -2,9 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -124,21 +121,54 @@ func protectHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	var req ProtectRevealRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	resp, err := forwardRequest("http://crdp-service:8090/v1/protect", req)
+	// Read the body of the incoming request
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to call protect service: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
+
+	// Unmarshal the JSON into a map to modify it
+	var crdpProtectPayload map[string]interface{}
+	if err := json.Unmarshal(body, &crdpProtectPayload); err != nil {
+		http.Error(w, "Failed to parse JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Add CRDP protection policy to payload
+	crdpProtectPayload["protection_policy_name"] = "demo"
+
+	// Marshal payload back to JSON
+	payload, err := json.Marshal(crdpProtectPayload)
+	if err != nil {
+		http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
+		return
+	}
+
+	// Create a new CRDP protect request
+	protectAPIReq, err := http.NewRequest("POST", "http://crdp-service:8090/v1/protect", bytes.NewBuffer(payload))
+	if err != nil {
+		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+		return
+	}
+	protectAPIReq.Header.Set("Content-Type", "application/json")
+
+	// Forward the request
+	client := &http.Client{}
+	resp, err := client.Do(protectAPIReq)
+	if err != nil {
+		http.Error(w, "Failed to send request", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(resp)
+	w.WriteHeader(resp.StatusCode)
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		return
+	}
 }
 
 func revealHandler(w http.ResponseWriter, r *http.Request) {
@@ -147,94 +177,62 @@ func revealHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req ProtectRevealRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	// Extract Basic Auth credentials from the request header
+	username, _, ok := r.BasicAuth()
+	if !ok || username == "" {
+		http.Error(w, "Missing or invalid Basic Auth credentials", http.StatusUnauthorized)
 		return
 	}
 
-	resp, err := forwardRequest("http://crdp-service:8090/v1/reveal", req)
+	// Read the body of the incoming request
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to call reveal service: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
+
+	// Unmarshal the JSON into a map to modify it
+	var crdpRevealPayload map[string]interface{}
+	if err := json.Unmarshal(body, &crdpRevealPayload); err != nil {
+		http.Error(w, "Failed to parse JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Add CRDP protection policy to payload
+	crdpRevealPayload["protection_policy_name"] = "demo"
+	crdpRevealPayload["protected_data"] = crdpRevealPayload["data"]
+	crdpRevealPayload["username"] = username
+	delete(crdpRevealPayload, "data")
+
+	// Marshal payload back to JSON
+	payload, err := json.Marshal(crdpRevealPayload)
+	if err != nil {
+		http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
+		return
+	}
+
+	// Create a new CRDP protect request
+	protectAPIReq, err := http.NewRequest("POST", "http://crdp-service:8090/v1/reveal", bytes.NewBuffer(payload))
+	if err != nil {
+		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+		return
+	}
+	protectAPIReq.Header.Set("Content-Type", "application/json")
+
+	// Forward the request
+	client := &http.Client{}
+	resp, err := client.Do(protectAPIReq)
+	if err != nil {
+		http.Error(w, "Failed to send request", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(resp)
-}
-
-func encryptAES(plaintext, key, iv []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
+	w.WriteHeader(resp.StatusCode)
+	_, err = io.Copy(w, resp.Body)
 	if err != nil {
-		return nil, err
+		http.Error(w, "Failed to write response", http.StatusInternalServerError)
+		return
 	}
-
-	paddedData := pkcs5Padding(plaintext, block.BlockSize())
-	mode := cipher.NewCBCEncrypter(block, iv)
-	encrypted := make([]byte, len(paddedData))
-	mode.CryptBlocks(encrypted, paddedData)
-
-	return encrypted, nil
-}
-
-func decryptAES(ciphertext, key, iv []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	mode := cipher.NewCBCDecrypter(block, iv)
-	decrypted := make([]byte, len(ciphertext))
-	mode.CryptBlocks(decrypted, ciphertext)
-
-	return pkcs5Unpadding(decrypted)
-}
-
-func pkcs5Padding(data []byte, blockSize int) []byte {
-	padding := blockSize - len(data)%blockSize
-	padText := bytes.Repeat([]byte{byte(padding)}, padding)
-	return append(data, padText...)
-}
-
-func pkcs5Unpadding(data []byte) ([]byte, error) {
-	length := len(data)
-	if length == 0 {
-		return nil, fmt.Errorf("decrypted data is empty")
-	}
-
-	padding := int(data[length-1])
-	if padding > length {
-		return nil, fmt.Errorf("invalid padding size")
-	}
-
-	return data[:length-padding], nil
-}
-
-func generateRandomBytes(size int) ([]byte, error) {
-	bytes := make([]byte, size)
-	_, err := rand.Read(bytes)
-	if err != nil {
-		return nil, err
-	}
-	return bytes, nil
-}
-
-func forwardRequest(url string, req ProtectRevealRequest) ([]byte, error) {
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	httpResp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
-	if err != nil {
-		return nil, err
-	}
-	defer httpResp.Body.Close()
-
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return respBody, nil
 }
