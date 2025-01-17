@@ -5,10 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 )
 
 func encryptAES(plaintext, key, iv []byte) ([]byte, error) {
@@ -17,7 +14,7 @@ func encryptAES(plaintext, key, iv []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	paddedData := pkcs5Padding(plaintext, block.BlockSize())
+	paddedData := pkcs7Padding(plaintext, block.BlockSize())
 	mode := cipher.NewCBCEncrypter(block, iv)
 	encrypted := make([]byte, len(paddedData))
 	mode.CryptBlocks(encrypted, paddedData)
@@ -35,27 +32,37 @@ func decryptAES(ciphertext, key, iv []byte) ([]byte, error) {
 	decrypted := make([]byte, len(ciphertext))
 	mode.CryptBlocks(decrypted, ciphertext)
 
-	return pkcs5Unpadding(decrypted)
+	// Remove PKCS7 padding
+	unpaddedText, err := pkcs7Unpadding(decrypted, aes.BlockSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to remove padding: %v", err)
+	}
+
+	return unpaddedText, nil
 }
 
-func pkcs5Padding(data []byte, blockSize int) []byte {
+func pkcs7Padding(data []byte, blockSize int) []byte {
 	padding := blockSize - len(data)%blockSize
 	padText := bytes.Repeat([]byte{byte(padding)}, padding)
 	return append(data, padText...)
 }
 
-func pkcs5Unpadding(data []byte) ([]byte, error) {
-	length := len(data)
-	if length == 0 {
-		return nil, fmt.Errorf("decrypted data is empty")
-	}
-
-	padding := int(data[length-1])
-	if padding > length {
+// pkcs7Unpadding removes the padding from the data.
+func pkcs7Unpadding(data []byte, blockSize int) ([]byte, error) {
+	if len(data) == 0 || len(data)%blockSize != 0 {
 		return nil, fmt.Errorf("invalid padding size")
 	}
-
-	return data[:length-padding], nil
+	padding := int(data[len(data)-1])
+	if padding > blockSize || padding == 0 {
+		return nil, fmt.Errorf("invalid padding")
+	}
+	// Validate padding bytes
+	for i := 0; i < padding; i++ {
+		if data[len(data)-1-i] != byte(padding) {
+			return nil, fmt.Errorf("invalid padding")
+		}
+	}
+	return data[:len(data)-padding], nil
 }
 
 func generateRandomBytes(size int) ([]byte, error) {
@@ -65,24 +72,4 @@ func generateRandomBytes(size int) ([]byte, error) {
 		return nil, err
 	}
 	return bytes, nil
-}
-
-func forwardRequest(url string, req ProtectRevealRequest) ([]byte, error) {
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	httpResp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
-	if err != nil {
-		return nil, err
-	}
-	defer httpResp.Body.Close()
-
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return respBody, nil
 }
